@@ -61,6 +61,7 @@ static const struct lwan_config default_config = {
     .keep_alive_timeout = 15,
     .quiet = false,
     .proxy_protocol = false,
+    .allow_spoofing_origin_ip = false,
     .allow_cors = false,
     .expires = 1 * ONE_WEEK,
     .n_threads = 0,
@@ -595,6 +596,9 @@ static bool setup_from_config(struct lwan *lwan, const char *path)
             } else if (streq(line->key, "proxy_protocol")) {
                 lwan->config.proxy_protocol =
                     parse_bool(line->value, default_config.proxy_protocol);
+            } else if (streq(line->key, "allow_spoofing_origin_ip")) {
+                lwan->config.allow_spoofing_origin_ip =
+                    parse_bool(line->value, default_config.allow_spoofing_origin_ip);
             } else if (streq(line->key, "allow_cors")) {
                 lwan->config.allow_cors =
                     parse_bool(line->value, default_config.allow_cors);
@@ -705,6 +709,7 @@ static void try_setup_from_config(struct lwan *l,
 
     l->config.request_flags =
         (l->config.proxy_protocol ? REQUEST_ALLOW_PROXY_REQS : 0) |
+        (l->config.allow_spoofing_origin_ip ? REQUEST_ALLOW_SPOOFING_ORIGIN_IP : 0) |
         (l->config.allow_cors ? REQUEST_ALLOW_CORS : 0) |
         (l->config.ssl.send_hsts_header ? REQUEST_WANTS_HSTS_HEADER : 0);
 }

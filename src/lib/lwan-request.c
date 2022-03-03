@@ -577,6 +577,9 @@ static bool parse_headers(struct lwan_request_parser_helper *helper,
         case STR4_INT_L('R', 'a', 'n', 'g'):
             SET_HEADER_VALUE(range.raw, "Range");
             break;
+        case STR4_INT_L('X', '-', 'R', 'e'):
+            SET_HEADER_VALUE(xrealip, "X-Real-IP");
+            break;
         }
     }
 
@@ -1638,16 +1641,22 @@ lwan_request_get_remote_address(struct lwan_request *request,
     struct sockaddr_storage non_proxied_addr = {.ss_family = AF_UNSPEC};
     struct sockaddr_storage *sock_addr;
 
-    if (request->flags & REQUEST_PROXIED) {
-        sock_addr = (struct sockaddr_storage *)&request->proxy->from;
+    if (request->flags & REQUEST_ALLOW_SPOOFING_ORIGIN_IP) {
+        if (request->flags & REQUEST_PROXIED) {
+            sock_addr = (struct sockaddr_storage *)&request->proxy->from;
 
-        if (UNLIKELY(sock_addr->ss_family == AF_UNSPEC)) {
-            static const char unspecified[] = "*unspecified*";
+            if (UNLIKELY(sock_addr->ss_family == AF_UNSPEC)) {
+                static const char unspecified[] = "*unspecified*";
 
-            static_assert(sizeof(unspecified) <= INET6_ADDRSTRLEN,
-                          "Enough space for unspecified address family");
+                static_assert(sizeof(unspecified) <= INET6_ADDRSTRLEN,
+                            "Enough space for unspecified address family");
 
-            return memcpy(buffer, unspecified, sizeof(unspecified));
+                return memcpy(buffer, unspecified, sizeof(unspecified));
+            }
+        } else if (request->helper->xrealip.value && request->helper->xrealip.len) {
+            size_t len = LWAN_MIN(request->helper->xrealip.len, INET6_ADDRSTRLEN - 1);
+            strncpy(buffer, request->helper->xrealip.value, len), buffer[len] = 0;
+            return buffer;
         }
     } else {
         socklen_t sock_len = sizeof(non_proxied_addr);
