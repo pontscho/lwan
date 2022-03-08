@@ -879,7 +879,6 @@ static void read_cpu_topology(struct lwan *l)
     int step = ((int)ht_enabled + 1);
     for (int i = 0;i < logical_cores;i++) {
         l->cpu_siblings[i] = (i / step) * step;
-        printf("%d\n", l->cpu_siblings[i]);
     }
 
     l->have_cpu_topology = true;
