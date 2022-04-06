@@ -128,7 +128,6 @@ void lwan_default_response(struct lwan_request *request,
 void lwan_fill_default_response(struct lwan_strbuf *buffer,
                                 enum lwan_http_status status);
 
-void lwan_straitjacket_enforce_from_config(struct config *c);
 
 const char *lwan_get_config_path(char *path_buf, size_t path_buf_len);
 
@@ -138,7 +137,7 @@ uint8_t lwan_char_isdigit(char ch) __attribute__((pure));
 
 static ALWAYS_INLINE __attribute__((pure)) size_t lwan_nextpow2(size_t number)
 {
-#if defined(HAVE_BUILTIN_CLZLL)
+#if defined(LWAN_HAVE_BUILTIN_CLZLL)
     static const int size_bits = (int)sizeof(number) * CHAR_BIT;
 
     if (sizeof(size_t) == sizeof(unsigned int)) {
@@ -165,7 +164,7 @@ static ALWAYS_INLINE __attribute__((pure)) size_t lwan_nextpow2(size_t number)
     return number + 1;
 }
 
-#if defined(HAVE_MBEDTLS)
+#if defined(LWAN_HAVE_MBEDTLS)
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ssl.h>
@@ -181,7 +180,7 @@ struct lwan_tls_context {
 };
 #endif
 
-#ifdef HAVE_LUA
+#ifdef LWAN_HAVE_LUA
 #include <lua.h>
 
 lua_State *lwan_lua_create_state(const char *script_file, const char *script);
@@ -268,7 +267,7 @@ int lwan_connection_get_fd(const struct lwan *lwan,
 int lwan_format_rfc_time(const time_t in, char out LWAN_ARRAY_PARAM(30));
 int lwan_parse_rfc_time(const char in LWAN_ARRAY_PARAM(30), time_t *out);
 
-void lwan_straitjacket_enforce(const struct lwan_straitjacket *sj);
+void lwan_straitjacket_enforce_from_config(struct config *c);
 
 uint64_t lwan_request_get_id(struct lwan_request *request);
 

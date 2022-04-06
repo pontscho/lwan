@@ -484,7 +484,7 @@ struct lwan {
     struct lwan_connection *conns;
     struct lwan_value headers;
 
-#if defined(HAVE_MBEDTLS)
+#if defined(LWAN_HAVE_MBEDTLS)
     struct lwan_tls_context *tls;
 #endif
 
@@ -591,6 +591,8 @@ void lwan_request_await_write(struct lwan_request *r, int fd);
 void lwan_request_await_read_write(struct lwan_request *r, int fd);
 ssize_t lwan_request_async_read(struct lwan_request *r, int fd, void *buf, size_t len);
 ssize_t lwan_request_async_write(struct lwan_request *r, int fd, const void *buf, size_t len);
+
+void lwan_straitjacket_enforce(const struct lwan_straitjacket *sj);
 
 #if defined(__cplusplus)
 }

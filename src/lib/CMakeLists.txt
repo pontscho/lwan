@@ -43,9 +43,10 @@ set(SOURCES
 	sd-daemon.c
 	sha1.c
 	timeout.c
+	lwan-h2-huffman.c
 )
 
-if (HAVE_LUA)
+if (LWAN_HAVE_LUA)
 	list(APPEND SOURCES lwan-lua.c lwan-mod-lua.c)
 endif ()
 
@@ -154,6 +155,7 @@ install(FILES
 	lwan-mod-rewrite.h
 	lwan-mod-response.h
 	lwan-mod-redirect.h
+	lwan-mod-lua.h
 	lwan-status.h
 	lwan-template.h
 	lwan-trie.h
