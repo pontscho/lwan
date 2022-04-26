@@ -306,8 +306,6 @@ enum lwan_connection_flags {
 
     /* Is this a TLS connection? */
     CONN_TLS = 1 << 12,
-
-    CONN_CLOSED = 1 << 13,
 };
 
 enum lwan_connection_coro_yield {

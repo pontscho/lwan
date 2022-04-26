@@ -94,10 +94,7 @@ void timeout_queue_expire(struct timeout_queue *tq,
         conn->coro = NULL;
     }
 
-    if ((conn->flags & CONN_CLOSED) == 0) {
-        close(lwan_connection_get_fd(tq->lwan, conn));
-    }
-    conn->flags |= CONN_CLOSED;
+    close(lwan_connection_get_fd(tq->lwan, conn));
 }
 
 void timeout_queue_expire_waiting(struct timeout_queue *tq)
