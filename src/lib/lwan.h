@@ -42,10 +42,9 @@ extern "C" {
 #if defined(__cplusplus)
 #define ZERO_IF_IS_ARRAY(array) 0
 #else
-/* This macro expands to 0 if its parameter is an array, and generates a
+/* This macro expands to 0 if its parameter is an array, and causes a
  * compilation error otherwise.  This is used by the N_ELEMENTS() macro to catch
- * invalid usages of this macro (e.g. when using arrays decayed to pointers in
- * function parameters). */
+ * invalid usages of this macro (e.g. when using arrays decayed to pointers) */
 #define ZERO_IF_IS_ARRAY(array)                                                \
     (!sizeof(char[1 - 2 * __builtin_types_compatible_p(                        \
                               __typeof__(array), __typeof__(&(array)[0]))]))
@@ -268,14 +267,29 @@ enum lwan_connection_flags {
     CONN_EVENTS_MASK = 1 << 0 | 1 << 1,
 
     CONN_IS_KEEP_ALIVE = 1 << 2,
+
+    /* WebSockets-related flags. */
     CONN_IS_UPGRADE = 1 << 3,
     CONN_IS_WEBSOCKET = 1 << 4,
 
-    /* This is only used to determine if timeout_del() is necessary when
-     * the connection coro ends. */
+    /* These are used for a few different things:
+     * - Avoid re-deferring callbacks to remove request from the timeout wheel
+     *   after it has slept previously and is requesting to sleep again. (The
+     *   timeout defer is disarmed right after resuming, and is only there because
+     *   connections may be closed when they're suspended.)
+     * - Distinguish file descriptor in event loop between the connection and
+     *   an awaited file descriptor.  (This is set in the connection that's awaiting
+     *   since the pointer to the connection is used as user_data in both cases.
+     *   This is required to be able to resume the connection coroutine after the
+     *   await is completed, and to bubble up errors in awaited file descriptors to
+     *   request handlers rather than abruptly closing the connection.) */
     CONN_SUSPENDED = 1 << 5,
     CONN_HAS_REMOVE_SLEEP_DEFER = 1 << 6,
+    CONN_AWAITED_FD = CONN_SUSPENDED | CONN_HAS_REMOVE_SLEEP_DEFER,
 
+    /* Used when HTTP pipelining has been detected.  This enables usage of the
+     * MSG_MORE flags when sending responses to batch as many short responses
+     * as possible in a single TCP fragment. */
     CONN_CORK = 1 << 7,
 
     /* Set only on file descriptors being watched by async/await to determine
@@ -295,14 +309,25 @@ enum lwan_connection_flags {
 };
 
 enum lwan_connection_coro_yield {
+    /* Returns to the event loop and terminates the coroutine, freeing
+     * all resources associated with it, including calling deferred
+     * callback, and the coroutine itself. */
     CONN_CORO_ABORT,
 
+    /* Return to the event loop without changing the epoll event mask
+     * or any other flag in this coroutine. */
     CONN_CORO_YIELD,
 
+    /* Returns to the event loop, and optionally change the epoll event
+     * mask (if it's not already the expected one.) */
     CONN_CORO_WANT_READ,
     CONN_CORO_WANT_WRITE,
     CONN_CORO_WANT_READ_WRITE,
 
+    /* If a connection coroutine yields with CONN_CORO_SUSPEND, then
+     * it'll be resumed using CONN_CORO_RESUME from the event loop.
+     * CONN_CORO_RESUME should never be used from within connections
+     * themselves, and should be considered a private API. */
     CONN_CORO_SUSPEND,
     CONN_CORO_RESUME,
 
@@ -314,6 +339,8 @@ enum lwan_connection_coro_yield {
 
     CONN_CORO_MAX,
 
+    /* Private API used by the async/await mechanism.  Shouldn't be used
+     * by handlers. */
     CONN_CORO_ASYNC = CONN_CORO_ASYNC_AWAIT_READ,
 };
 
@@ -531,7 +558,12 @@ void lwan_request_sleep(struct lwan_request *request, uint64_t ms);
 
 bool lwan_response_set_chunked(struct lwan_request *request,
                                enum lwan_http_status status);
+bool lwan_response_set_chunked_full(struct lwan_request *request,
+                                    enum lwan_http_status status,
+                                    const struct lwan_key_value *additional_headers);
 void lwan_response_send_chunk(struct lwan_request *request);
+void lwan_response_send_chunk_full(struct lwan_request *request,
+                                   struct lwan_strbuf *strbuf);
 
 bool lwan_response_set_event_stream(struct lwan_request *request,
                                     enum lwan_http_status status);
@@ -553,6 +585,11 @@ lwan_request_get_remote_address(struct lwan_request *request,
                                 char buffer LWAN_ARRAY_PARAM(INET6_ADDRSTRLEN))
     __attribute__((warn_unused_result));
 
+const char *
+lwan_request_get_remote_address_and_port(struct lwan_request *request,
+                                         char buffer LWAN_ARRAY_PARAM(INET6_ADDRSTRLEN),
+                                         uint16_t *port)
+    __attribute__((warn_unused_result));
 
 static inline enum lwan_request_flags
 lwan_request_get_method(const struct lwan_request *request)
@@ -590,7 +627,12 @@ void lwan_request_await_read(struct lwan_request *r, int fd);
 void lwan_request_await_write(struct lwan_request *r, int fd);
 void lwan_request_await_read_write(struct lwan_request *r, int fd);
 ssize_t lwan_request_async_read(struct lwan_request *r, int fd, void *buf, size_t len);
+ssize_t lwan_request_async_read_flags(struct lwan_request *request, int fd, void *buf, size_t len, int flags);
 ssize_t lwan_request_async_write(struct lwan_request *r, int fd, const void *buf, size_t len);
+ssize_t lwan_request_async_writev(struct lwan_request *request,
+                                  int fd,
+                                  struct iovec *iov,
+                                  int iov_count);
 
 void lwan_straitjacket_enforce(const struct lwan_straitjacket *sj);
 

@@ -497,28 +497,29 @@ __attribute__((noinline)) static void set_header_value(
         set_header_value(&(helper->dest), end, p, header_len);                 \
     } while (0)
 
-static bool parse_headers(struct lwan_request_parser_helper *helper,
-                          char *buffer)
+static ALWAYS_INLINE ssize_t find_headers(char **header_start,
+                                          struct lwan_value *request_buffer,
+                                          char **next_request)
 {
-    char *buffer_end = helper->buffer->value + helper->buffer->len;
-    char **header_start = helper->header_start;
-    size_t n_headers = 0;
+    char *buffer = request_buffer->value;
+    char *buffer_end = buffer + request_buffer->len;
+    ssize_t n_headers = 0;
     char *next_header;
 
     for (char *next_chr = buffer + 1;;) {
         next_header = memchr(next_chr, '\r', (size_t)(buffer_end - next_chr));
 
         if (UNLIKELY(!next_header))
-            return false;
+            return -1;
 
         if (next_chr == next_header) {
             if (buffer_end - next_chr >= (ptrdiff_t)HEADER_TERMINATOR_LEN) {
                 STRING_SWITCH_SMALL (next_header) {
                 case STR2_INT('\r', '\n'):
-                    helper->next_request = next_header + HEADER_TERMINATOR_LEN;
+                    *next_request = next_header + HEADER_TERMINATOR_LEN;
                 }
             }
-            break;
+            goto out;
         }
 
         /* Is there at least a space for a minimal (H)eader and a (V)alue? */
@@ -526,20 +527,34 @@ static bool parse_headers(struct lwan_request_parser_helper *helper,
             header_start[n_headers++] = next_chr;
 
             if (UNLIKELY(n_headers >= N_HEADER_START - 1))
-                return false;
+                return -1;
         } else {
             /* Better to abort early if there's no space. */
-            return false;
+            return -1;
         }
 
         next_chr = next_header + HEADER_TERMINATOR_LEN;
         if (UNLIKELY(next_chr >= buffer_end))
-            return false;
+            return -1;
     }
 
+out:
     header_start[n_headers] = next_header;
+    return n_headers;
+}
 
-    for (size_t i = 0; i < n_headers; i++) {
+static bool parse_headers(struct lwan_request_parser_helper *helper,
+                          char *buffer)
+{
+    char **header_start = helper->header_start;
+    ssize_t n_headers = 0;
+
+    n_headers = find_headers(header_start, helper->buffer,
+                             &helper->next_request);
+    if (n_headers < 0)
+        return false;
+
+    for (ssize_t i = 0; i < n_headers; i++) {
         char *p = header_start[i];
         char *end = header_start[i + 1] - HEADER_TERMINATOR_LEN;
 
@@ -583,11 +598,17 @@ static bool parse_headers(struct lwan_request_parser_helper *helper,
         }
     }
 
-    helper->n_header_start = n_headers;
+    helper->n_header_start = (size_t)n_headers;
     return true;
 }
 #undef HEADER_LENGTH
 #undef SET_HEADER_VALUE
+
+ssize_t lwan_find_headers(char **header_start, struct lwan_value *buffer,
+                          char **next_request)
+{
+    return find_headers(header_start, buffer, next_request);
+}
 
 static void parse_if_modified_since(struct lwan_request_parser_helper *helper)
 {
@@ -887,14 +908,13 @@ try_to_finalize:
 }
 
 static enum lwan_read_finalizer
-read_request_finalizer(const struct lwan_value *buffer,
-                       size_t want_to_read __attribute__((unused)),
-                       const struct lwan_request *request,
-                       int n_packets)
+read_request_finalizer_from_helper(const struct lwan_value *buffer,
+                                   struct lwan_request_parser_helper *helper,
+                                   int n_packets,
+                                   bool allow_proxy_reqs)
 {
     static const size_t min_proxied_request_size =
         MIN_REQUEST_SIZE + sizeof(struct proxy_header_v2);
-    struct lwan_request_parser_helper *helper = request->helper;
 
     if (LIKELY(buffer->len >= MIN_REQUEST_SIZE)) {
         STRING_SWITCH (buffer->value + buffer->len - 4) {
@@ -914,8 +934,7 @@ read_request_finalizer(const struct lwan_value *buffer,
         if (crlfcrlf_to_base >= MIN_REQUEST_SIZE - 4)
             return FINALIZER_DONE;
 
-        if (buffer->len > min_proxied_request_size &&
-            request->flags & REQUEST_ALLOW_PROXY_REQS) {
+        if (buffer->len > min_proxied_request_size && allow_proxy_reqs) {
             /* FIXME: Checking for PROXYv2 protocol header here is a layering
              * violation. */
             STRING_SWITCH_LARGE (crlfcrlf + 4) {
@@ -935,6 +954,17 @@ read_request_finalizer(const struct lwan_value *buffer,
         return FINALIZER_TIMEOUT;
 
     return FINALIZER_TRY_AGAIN;
+}
+
+static inline enum lwan_read_finalizer
+read_request_finalizer(const struct lwan_value *buffer,
+                       size_t want_to_read __attribute__((unused)),
+                       const struct lwan_request *request,
+                       int n_packets)
+{
+    return read_request_finalizer_from_helper(
+        buffer, request->helper, n_packets,
+        request->flags & REQUEST_ALLOW_PROXY_REQS);
 }
 
 static ALWAYS_INLINE enum lwan_http_status
@@ -1594,22 +1624,24 @@ const char *lwan_request_get_cookie(struct lwan_request *request,
     return value_lookup(lwan_request_get_cookies(request), key);
 }
 
-const char *lwan_request_get_header(struct lwan_request *request,
+const char *
+lwan_request_get_header_from_helper(struct lwan_request_parser_helper *helper,
                                     const char *header)
 {
     const size_t header_len = strlen(header);
-    const size_t header_len_with_separator = header_len + HEADER_VALUE_SEPARATOR_LEN;
+    const size_t header_len_with_separator =
+        header_len + HEADER_VALUE_SEPARATOR_LEN;
 
     assert(strchr(header, ':') == NULL);
 
-    for (size_t i = 0; i < request->helper->n_header_start; i++) {
-        const char *start = request->helper->header_start[i];
-        char *end = request->helper->header_start[i + 1] - HEADER_TERMINATOR_LEN;
+    for (size_t i = 0; i < helper->n_header_start; i++) {
+        const char *start = helper->header_start[i];
+        char *end = helper->header_start[i + 1] - HEADER_TERMINATOR_LEN;
 
         if (UNLIKELY((size_t)(end - start) < header_len_with_separator))
             continue;
 
-        STRING_SWITCH_SMALL(start + header_len) {
+        STRING_SWITCH_SMALL (start + header_len) {
         case STR2_INT(':', ' '):
             if (!strncasecmp(start, header, header_len)) {
                 *end = '\0';
@@ -1619,6 +1651,12 @@ const char *lwan_request_get_header(struct lwan_request *request,
     }
 
     return NULL;
+}
+
+inline const char *lwan_request_get_header(struct lwan_request *request,
+                                           const char *header)
+{
+    return lwan_request_get_header_from_helper(request->helper, header);
 }
 
 const char *lwan_request_get_host(struct lwan_request *request)
@@ -1635,11 +1673,14 @@ lwan_connection_get_fd(const struct lwan *lwan, const struct lwan_connection *co
 }
 
 const char *
-lwan_request_get_remote_address(struct lwan_request *request,
-                                char buffer[static INET6_ADDRSTRLEN])
+lwan_request_get_remote_address_and_port(struct lwan_request *request,
+                                         char buffer[static INET6_ADDRSTRLEN],
+                                         uint16_t *port)
 {
     struct sockaddr_storage non_proxied_addr = {.ss_family = AF_UNSPEC};
     struct sockaddr_storage *sock_addr;
+
+    *port = 0;
 
     if (request->flags & REQUEST_ALLOW_SPOOFING_ORIGIN_IP) {
         if (request->flags & REQUEST_PROXIED) {
@@ -1670,12 +1711,22 @@ lwan_request_get_remote_address(struct lwan_request *request,
     }
 
     if (sock_addr->ss_family == AF_INET) {
-        return inet_ntop(AF_INET, &((struct sockaddr_in *)sock_addr)->sin_addr,
-                         buffer, INET6_ADDRSTRLEN);
+        struct sockaddr_in *sin = (struct sockaddr_in *)sock_addr;
+        *port = ntohs(sin->sin_port);
+        return inet_ntop(AF_INET, &sin->sin_addr, buffer, INET6_ADDRSTRLEN);
     }
 
-    return inet_ntop(AF_INET6, &((struct sockaddr_in6 *)sock_addr)->sin6_addr,
-                     buffer, INET6_ADDRSTRLEN);
+    struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)sock_addr;
+    *port = ntohs(sin6->sin6_port);
+    return inet_ntop(AF_INET6, &sin6->sin6_addr, buffer, INET6_ADDRSTRLEN);
+}
+
+const char *
+lwan_request_get_remote_address(struct lwan_request *request,
+                                char buffer[static INET6_ADDRSTRLEN])
+{
+    uint16_t port;
+    return lwan_request_get_remote_address_and_port(request, buffer, &port);
 }
 
 static void remove_sleep(void *data1, void *data2)
@@ -1822,6 +1873,12 @@ static int useless_coro_for_fuzzing(struct coro *c __attribute__((unused)),
     return 0;
 }
 
+static bool request_seems_complete(struct lwan_request_parser_helper *helper)
+{
+    return read_request_finalizer_from_helper(helper->buffer, helper, 1,
+                                              false) == FINALIZER_DONE;
+}
+
 __attribute__((used)) int fuzz_parse_http_request(const uint8_t *data,
                                                   size_t length)
 {
@@ -1854,16 +1911,10 @@ __attribute__((used)) int fuzz_parse_http_request(const uint8_t *data,
         .flags = REQUEST_ALLOW_PROXY_REQS,
         .proxy = &proxy,
     };
-    struct lwan_value buffer = {
-        .value = data_copy,
-        .len = length,
-    };
 
     /* If the finalizer isn't happy with a request, there's no point in
      * going any further with parsing it. */
-    enum lwan_read_finalizer finalizer =
-        read_request_finalizer(&buffer, sizeof(data_copy), &request, 1);
-    if (finalizer != FINALIZER_DONE)
+    if (!request_seems_complete(&helper))
         return 0;
 
     /* client_read() NUL-terminates the string */
@@ -1948,13 +1999,11 @@ void lwan_request_await_read_write(struct lwan_request *r, int fd)
     return async_await_fd(r->conn->coro, fd, CONN_CORO_ASYNC_AWAIT_READ_WRITE);
 }
 
-ssize_t lwan_request_async_read(struct lwan_request *request,
-                                int fd,
-                                void *buf,
-                                size_t len)
+ssize_t lwan_request_async_read_flags(
+    struct lwan_request *request, int fd, void *buf, size_t len, int flags)
 {
     while (true) {
-        ssize_t r = recv(fd, buf, len, MSG_DONTWAIT);
+        ssize_t r = recv(fd, buf, len, MSG_DONTWAIT | MSG_NOSIGNAL | flags);
 
         if (r < 0) {
             switch (errno) {
@@ -1963,11 +2012,21 @@ ssize_t lwan_request_async_read(struct lwan_request *request,
                 /* Fallthrough */
             case EINTR:
                 continue;
+            case EPIPE:
+                return -errno;
             }
         }
 
         return r;
     }
+}
+
+ssize_t lwan_request_async_read(struct lwan_request *request,
+                                int fd,
+                                void *buf,
+                                size_t len)
+{
+    return lwan_request_async_read_flags(request, fd, buf, len, 0);
 }
 
 ssize_t lwan_request_async_write(struct lwan_request *request,
@@ -1976,7 +2035,7 @@ ssize_t lwan_request_async_write(struct lwan_request *request,
                                  size_t len)
 {
     while (true) {
-        ssize_t r = send(fd, buf, len, MSG_DONTWAIT);
+        ssize_t r = send(fd, buf, len, MSG_DONTWAIT|MSG_NOSIGNAL);
 
         if (r < 0) {
             switch (errno) {
@@ -1985,9 +2044,66 @@ ssize_t lwan_request_async_write(struct lwan_request *request,
                 /* Fallthrough */
             case EINTR:
                 continue;
+            case EPIPE:
+                return -errno;
             }
         }
 
         return r;
     }
+}
+
+ssize_t lwan_request_async_writev(struct lwan_request *request,
+                                  int fd,
+                                  struct iovec *iov,
+                                  int iov_count)
+{
+    ssize_t total_written = 0;
+    int curr_iov = 0;
+
+    for (int tries = 10; tries;) {
+        const int remaining_len = (int)(iov_count - curr_iov);
+        ssize_t written;
+
+        if (remaining_len == 1) {
+            const struct iovec *vec = &iov[curr_iov];
+            return lwan_request_async_write(request, fd, vec->iov_base,
+                                            vec->iov_len);
+        }
+
+        written = writev(fd, iov + curr_iov, (size_t)remaining_len);
+        if (UNLIKELY(written < 0)) {
+            /* FIXME: Consider short writes as another try as well? */
+            tries--;
+
+            switch (errno) {
+            case EAGAIN:
+            case EINTR:
+                goto try_again;
+            default:
+                goto out;
+            }
+        }
+
+        total_written += written;
+
+        while (curr_iov < iov_count &&
+               written >= (ssize_t)iov[curr_iov].iov_len) {
+            written -= (ssize_t)iov[curr_iov].iov_len;
+            curr_iov++;
+        }
+
+        if (curr_iov == iov_count)
+            return total_written;
+
+        iov[curr_iov].iov_base = (char *)iov[curr_iov].iov_base + written;
+        iov[curr_iov].iov_len -= (size_t)written;
+
+    try_again:
+        lwan_request_await_write(request, fd);
+    }
+
+out:
+    coro_yield(request->conn->coro, CONN_CORO_ABORT);
+    __builtin_unreachable();
 }

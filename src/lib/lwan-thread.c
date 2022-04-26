@@ -462,7 +462,7 @@ conn_flags_to_epoll_events(enum lwan_connection_flags flags)
     return map[flags & CONN_EVENTS_MASK];
 }
 
-static void update_epoll_flags(int fd,
+static void update_epoll_flags(const struct timeout_queue *tq,
                                struct lwan_connection *conn,
                                int epoll_fd,
                                enum lwan_connection_coro_yield yield_result)
@@ -510,10 +510,9 @@ static void update_epoll_flags(int fd,
     if (conn->flags == prev_flags)
         return;
 
-    struct epoll_event event = {
-        .events = conn_flags_to_epoll_events(conn->flags),
-        .data.ptr = conn,
-    };
+    struct epoll_event event = {.events = conn_flags_to_epoll_events(conn->flags),
+                                .data.ptr = conn};
+    int fd = lwan_connection_get_fd(tq->lwan, conn);
 
     if (UNLIKELY(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &event) < 0))
         lwan_status_perror("epoll_ctl");
@@ -527,7 +526,7 @@ static void clear_async_await_flag(void *data)
 }
 
 static enum lwan_connection_coro_yield
-resume_async(struct timeout_queue *tq,
+resume_async(const struct timeout_queue *tq,
              enum lwan_connection_coro_yield yield_result,
              int64_t from_coro,
              struct lwan_connection *conn,
@@ -580,14 +579,17 @@ static ALWAYS_INLINE void resume_coro(struct timeout_queue *tq,
     int64_t from_coro = coro_resume(conn->coro);
     enum lwan_connection_coro_yield yield_result = from_coro & 0xffffffff;
 
-    if (UNLIKELY(yield_result >= CONN_CORO_ASYNC))
-        yield_result = resume_async(tq, yield_result, from_coro, conn, epoll_fd);
+    if (UNLIKELY(yield_result >= CONN_CORO_ASYNC)) {
+        yield_result =
+            resume_async(tq, yield_result, from_coro, conn, epoll_fd);
+    }
 
-    if (UNLIKELY(yield_result == CONN_CORO_ABORT))
-        return timeout_queue_expire(tq, conn);
-
-    return update_epoll_flags(lwan_connection_get_fd(tq->lwan, conn), conn,
-                              epoll_fd, yield_result);
+    if (UNLIKELY(yield_result == CONN_CORO_ABORT)) {
+        timeout_queue_expire(tq, conn);
+    } else {
+        update_epoll_flags(tq, conn, epoll_fd, yield_result);
+        timeout_queue_move_to_last(tq, conn);
+    }
 }
 
 static void update_date_cache(struct lwan_thread *thread)
@@ -733,9 +735,7 @@ static bool process_pending_timers(struct timeout_queue *tq,
         }
 
         request = container_of(timeout, struct lwan_request, timeout);
-
-        update_epoll_flags(request->fd, request->conn, epoll_fd,
-                           CONN_CORO_RESUME);
+        update_epoll_flags(tq, request->conn, epoll_fd, CONN_CORO_RESUME);
     }
 
     if (should_expire_timers) {
@@ -933,10 +933,7 @@ static void *thread_io_loop(void *data)
         for (struct epoll_event *event = events; n_fds--; event++) {
             struct lwan_connection *conn = event->data.ptr;
 
-            if (UNLIKELY(event->events & (EPOLLRDHUP | EPOLLHUP))) {
-                timeout_queue_expire(&tq, conn);
-                continue;
-            }
+            assert(!(conn->flags & CONN_ASYNC_AWAIT));
 
             if (conn->flags & (CONN_LISTENER_HTTP | CONN_LISTENER_HTTPS)) {
                 if (LIKELY(accept_waiting_clients(t, conn)))
@@ -946,9 +943,16 @@ static void *thread_io_loop(void *data)
                 break;
             }
 
+            if (UNLIKELY(event->events & (EPOLLRDHUP | EPOLLHUP))) {
+                if ((conn->flags & CONN_AWAITED_FD) != CONN_SUSPENDED) {
+                    timeout_queue_expire(&tq, conn);
+                    continue;
+                }
+            }
+
             if (!conn->coro) {
                 if (UNLIKELY(!spawn_coro(conn, &switcher, &tq))) {
-                    send_last_response_without_coro(t->lwan, conn, HTTP_INTERNAL_ERROR);
+                    send_last_response_without_coro(t->lwan, conn, HTTP_UNAVAILABLE);
                     continue;
                 }
 
@@ -956,7 +960,6 @@ static void *thread_io_loop(void *data)
             }
 
             resume_coro(&tq, conn, epoll_fd);
-            timeout_queue_move_to_last(&tq, conn);
         }
 
         if (created_coros)
