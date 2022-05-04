@@ -1341,9 +1341,9 @@ prepare_websocket_handshake(struct lwan_request *request, char **encoded)
     if (UNLIKELY(!(request->conn->flags & CONN_IS_UPGRADE)))
         return HTTP_BAD_REQUEST;
 
-    const char *upgrade = lwan_request_get_header(request, "Upgrade");
-    if (UNLIKELY(!upgrade || !streq(upgrade, "websocket")))
-        return HTTP_BAD_REQUEST;
+//    const char *upgrade = lwan_request_get_header(request, "Upgrade");
+//    if (UNLIKELY(!upgrade || !streq(upgrade, "websocket")))
+//        return HTTP_BAD_REQUEST;
 
     const char *sec_websocket_key =
         lwan_request_get_header(request, "Sec-WebSocket-Key");
